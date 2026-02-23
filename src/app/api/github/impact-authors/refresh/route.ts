@@ -8,6 +8,8 @@
 
 import { NextResponse } from "next/server";
 import { computeTopAuthors } from "@/lib/github/impact/computeAuthorStats";
+import { syncMergedPrsToDb } from "@/lib/github/sync/syncMergedPrsToDb";
+import { databasePath } from "@/lib/db/sqlite";
 
 export const runtime = "nodejs"; // Uses better-sqlite3; requires Node runtime.
 
@@ -23,18 +25,49 @@ export async function POST(request: Request) {
     }
     const daysVal = typeof body?.days === "number" ? body.days : 90;
     const days = ALLOWED_DAYS.has(daysVal) ? daysVal : 90;
+    const maxPrs = typeof body?.maxPrs === "number" ? body.maxPrs : 2000;
+    const maxListPages = typeof body?.maxListPages === "number" ? body.maxListPages : 10;
+
+    if (!process.env.GITHUB_TOKEN) {
+      return NextResponse.json({ ok: false, error: "GITHUB_TOKEN missing" }, { status: 500 });
+    }
+
+    console.info("impact:refresh start owner=%s repo=%s days=%s", owner, repo, days);
+
+    const syncSummary = await syncMergedPrsToDb({
+      owner,
+      repo,
+      days,
+      maxPrs,
+      maxListPages,
+    });
+    console.info("impact:refresh sync complete", syncSummary);
 
     const { window, topAuthors, computedAt, rowsWritten } = await computeTopAuthors({
       owner,
       repo,
       days,
     });
+    console.info("impact:refresh compute complete rows=%s", rowsWritten);
 
     return NextResponse.json({
       ok: true,
+      version: "refresh-v2-2026-02-23",
       window,
-      rowsWritten,
-      computedAt,
+      dbPath: databasePath,
+      sync: {
+        discoveredMergedPrs: syncSummary.discoveredMergedPrs,
+        fetchedPrDetails: syncSummary.fetchedPrDetails,
+        storedRaw: syncSummary.storedRaw,
+        insertedPrFacts: syncSummary.insertedPrFacts,
+        skippedDuplicates: syncSummary.skippedDuplicates,
+        rateLimit: syncSummary.rateLimit,
+        repoDefaultBranch: syncSummary.repoDefaultBranch,
+      },
+      compute: {
+        rowsWritten,
+        computedAt,
+      },
       topAuthors,
     });
   } catch (error) {
