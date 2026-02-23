@@ -25,22 +25,22 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_DAYS = 90;
 
 const debugEnabled = () => process.env.DEBUG_IMPACT === "1";
-const debugTime = (label: string, fn: () => void) => {
+const debugTime = async (label: string, fn: () => Promise<void> | void) => {
   if (!debugEnabled()) {
-    fn();
+    await fn();
     return;
   }
   console.time(label);
-  fn();
+  await fn();
   console.timeEnd(label);
 };
 
-export function computeTopAuthors(params: ComputeParams): {
+export async function computeTopAuthors(params: ComputeParams): Promise<{
   window: { days: number; since: string; until: string };
   topAuthors: AuthorStat[];
   computedAt: string;
   rowsWritten: number;
-} {
+}> {
   const owner = params.owner?.trim();
   const repo = params.repo?.trim();
   if (!owner || !repo) {
@@ -53,15 +53,15 @@ export function computeTopAuthors(params: ComputeParams): {
 
   if (debugEnabled()) console.log("PATH=RECOMPUTE");
 
-  debugTime("impact:initDatabase", () => initDatabase());
+  await debugTime("impact:initDatabase", () => initDatabase());
   const db = getDbConnection();
 
-  debugTime("impact:refreshFacts", () => {
-    refreshPrFactsForRepo({ owner, repo, days });
+  await debugTime("impact:refreshFacts", async () => {
+    await refreshPrFactsForRepo({ owner, repo, days });
   });
 
   let agg: AuthorStat[] = [];
-  debugTime("impact:computeStats", () => {
+  await debugTime("impact:computeStats", () => {
     agg = db
       .prepare(
         `

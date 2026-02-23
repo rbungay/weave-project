@@ -1,6 +1,8 @@
 import "server-only";
 
+import crypto from "crypto";
 import { getDbConnection, initDatabase } from "@/lib/db/sqlite";
+import { GithubHttpError, githubFetchJson } from "@/lib/github/client";
 
 type RefreshParams = {
   owner: string;
@@ -42,7 +44,9 @@ function deriveKind(title: string): { kind: string; points: number } {
   return { kind: "other", points: 0.5 };
 }
 
-export function refreshPrFactsForRepo(params: RefreshParams): { sinceIso: string; untilIso: string } {
+export async function refreshPrFactsForRepo(
+  params: RefreshParams
+): Promise<{ sinceIso: string; untilIso: string }> {
   const owner = params.owner?.trim();
   const repo = params.repo?.trim();
   if (!owner || !repo) {
@@ -55,7 +59,7 @@ export function refreshPrFactsForRepo(params: RefreshParams): { sinceIso: string
   initDatabase();
   const db = getDbConnection();
 
-  // Fetch latest repo payload to get default branch
+  // Ensure repo metadata (default_branch) exists; fetch from GitHub if missing.
   const repoEndpoint = `/repos/${owner}/${repo}`;
   const repoRow = db
     .prepare(
@@ -67,14 +71,52 @@ export function refreshPrFactsForRepo(params: RefreshParams): { sinceIso: string
     )
     .get({ endpoint: repoEndpoint }) as { payload?: string } | undefined;
 
-  const repoPayload = repoRow?.payload ? JSON.parse(repoRow.payload) : null;
-  const defaultBranch =
+  let repoPayload = repoRow?.payload ? JSON.parse(repoRow.payload) : null;
+  let defaultBranch =
     repoPayload && typeof repoPayload["default_branch"] === "string"
       ? (repoPayload["default_branch"] as string)
       : null;
 
+  if (defaultBranch) {
+    console.info("impact:repo_metadata source=db");
+  } else {
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) {
+      throw new Error("GITHUB_TOKEN missing");
+    }
+    const url = `https://api.github.com/repos/${owner}/${repo}`;
+    try {
+      const { status, data } = await githubFetchJson<Record<string, unknown>>(url);
+      console.info("impact:repo_metadata source=github status=%s", status);
+      repoPayload = data;
+      defaultBranch =
+        data && typeof data["default_branch"] === "string"
+          ? (data["default_branch"] as string)
+          : null;
+      const payloadString = JSON.stringify(data);
+      const checksum = crypto.createHash("sha256").update(payloadString).digest("hex");
+      db.prepare(
+        `INSERT INTO api_raw_responses (source, endpoint, fetched_at, status_code, payload, checksum)
+         VALUES ('github', @endpoint, CURRENT_TIMESTAMP, @status_code, @payload, @checksum)`
+      ).run({
+        endpoint: repoEndpoint,
+        status_code: status,
+        payload: payloadString,
+        checksum,
+      });
+    } catch (error) {
+      if (error instanceof GithubHttpError) {
+        throw new Error(`GitHub repo fetch failed (${error.status}) url=${url}`);
+      }
+      if (error instanceof Error && error.message.includes("GITHUB_TOKEN")) {
+        throw new Error("GITHUB_TOKEN missing");
+      }
+      throw error instanceof Error ? error : new Error("Unknown error fetching repo metadata");
+    }
+  }
+
   if (!defaultBranch) {
-    throw new Error("default_branch not found in stored repo metadata");
+    throw new Error("default_branch not found; ensure repository metadata is available");
   }
 
   // Latest PR detail rows per PR number within window and merged into default branch

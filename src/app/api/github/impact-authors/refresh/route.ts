@@ -24,7 +24,11 @@ export async function POST(request: Request) {
     const daysVal = typeof body?.days === "number" ? body.days : 90;
     const days = ALLOWED_DAYS.has(daysVal) ? daysVal : 90;
 
-    const { window, topAuthors, computedAt, rowsWritten } = computeTopAuthors({ owner, repo, days });
+    const { window, topAuthors, computedAt, rowsWritten } = await computeTopAuthors({
+      owner,
+      repo,
+      days,
+    });
 
     return NextResponse.json({
       ok: true,
